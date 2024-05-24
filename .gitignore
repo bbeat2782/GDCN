@@ -1,0 +1,13 @@
+feature_mapping/
+submission/
+data/criteoTest/
+data/criteoTrainSampled
+data/criteo/.criteoTrain
+data/criteo/.criteoTrainSampled
+data/criteo/test_df_GDCN.csv
+data/criteo/train_df_GDCN.csv
+data/criteo/train_df_sampled_GDCN.csv
+chkpts/
+criteo/
+
+**/__pycache__/

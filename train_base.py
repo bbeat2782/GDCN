@@ -7,12 +7,13 @@ import argparse
 import os
 import time
 import tqdm
+import pandas as pd
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 from sklearn.metrics import log_loss, roc_auc_score
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from data.avazu.AvazuDataLoader import get_avazu_dataloader_811
-from data.criteo.CriteoDataLoader import get_criteo_dataloader_811
+from data.criteo.CriteoDataLoader import get_criteo_dataloader_811, get_criteo_dataloader_test
 from data.frappe.FrappeDataLoader import get_frappe_dataloader_811
 from data.malware.MalwareDataLoader import get_malware_dataloader_811
 from data.mltag.MLtagDataLoader import get_mltag_dataloader811
@@ -31,7 +32,8 @@ DataLoaders = {
     "avazu": lambda datapath, batch_size: get_avazu_dataloader_811(train_path=datapath, batch_size=batch_size),
     "malware": lambda datapath, batch_size: get_malware_dataloader_811(train_path=datapath, batch_size=batch_size),
     "frappe": lambda datapath, batch_size: get_frappe_dataloader_811(path=datapath, batch_size=batch_size),
-    "mltag": lambda datapath, batch_size: get_mltag_dataloader811(path=datapath, batch_size=batch_size)
+    "mltag": lambda datapath, batch_size: get_mltag_dataloader811(path=datapath, batch_size=batch_size),
+    "criteoTest": lambda datapath, batch_size: get_criteo_dataloader_test(test_path=datapath, batch_size=batch_size),
 }
 
 
@@ -107,6 +109,24 @@ def test_roc(model, data_loader):
     return roc_auc_score(targets, predicts), log_loss(targets, predicts)
 
 
+def predict(model_path, data_loader):
+    model = torch.load(model_path, map_location=DEVICE)
+    model.eval()
+    predicts = list()
+    with torch.no_grad():
+        for fields, _ in tqdm.tqdm(
+                data_loader, smoothing=0, mininterval=1.0):
+            fields = fields.long()
+            fields = fields.to(DEVICE)
+            y = torch.sigmoid(model(fields).squeeze(1))
+            predicts.extend(y.tolist())
+
+    submission = pd.read_csv('submission/sample_submission.csv')
+    submission['Click'] = predicts
+    submission.to_csv(f'submission/test_predictions_{model_path[-17:-4]}.csv', index=False)
+    return predicts
+
+
 def main(dataset_name,
          data_path,
          model_name,
@@ -143,14 +163,14 @@ def main(dataset_name,
             optimizer = torch.optim.Adam(params=model.parameters(), lr=learning_rate,
                                          weight_decay=weight_decay, )
 
-            early_stopping = EarlyStopping(patience=4, verbose=True)
+            early_stopping = EarlyStopping(patience=2, verbose=True)
 
             val_auc_best = 0
             auc_index_record = ""
             val_loss_best = 1000
             loss_index_record = ""
 
-            scheduler = ReduceLROnPlateau(optimizer, 'max', verbose=True, patience=5)
+            scheduler = ReduceLROnPlateau(optimizer, 'max', verbose=True, patience=1)
             for epoch_i in range(epoch):
                 print(__file__, model_name, batch_size, repeat, K, learning_rate, weight_decay,
                       epoch_i, "/", epoch)
@@ -164,6 +184,7 @@ def main(dataset_name,
                 end = time.time()
                 if val_auc > val_auc_best:
                     torch.save(model, paths + f"/{model_name}_best_auc_{K}_{time_fix}.pkl")
+                    print(paths + f"/{model_name}_best_auc_{K}_{time_fix}.pkl")
 
                 if val_auc > val_auc_best:
                     val_auc_best = val_auc
@@ -198,40 +219,51 @@ def main(dataset_name,
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset_name', default='frappe')
-    parser.add_argument('--save_dir', default='../chkpts/gdcn/')
+    parser.add_argument('--dataset_name', default='criteo')
+    #parser.add_argument('--dataset_name', default='criteoTest')
+    parser.add_argument('--save_dir', default='chkpts/gdcn/')
     parser.add_argument('--data_path', default="data/", help="")
     parser.add_argument('--model_name', default='fm')
-    parser.add_argument('--epoch', type=int, default=50)
+    parser.add_argument('--epoch', type=int, default=1)
     parser.add_argument('--emb_dim', type=int, default=16)
     parser.add_argument('--learning_rate', type=float, default=0.001)
     parser.add_argument('--batch_size', type=int, default=4096)
     parser.add_argument('--weight_decay', type=float, default=1e-6)
-    parser.add_argument('--device', default='cuda:0', help="cuda:0")
+    parser.add_argument('--device', default='cpu', help="cuda:0")
     parser.add_argument('--choice', default=0, type=int)
-    parser.add_argument('--repeats', default=10, type=int)
+    parser.add_argument('--repeats', default=1, type=int)
     parser.add_argument('--hint', default="v1.0")
+    parser.add_argument("--predict", type=str, help="Path to the model for prediction")
+
     args = parser.parse_args()
 
-    model_names = []
-    if args.choice == 0:
-        model_names = ["fm", "deepfm", "gdcn_s", "gdcn_p"]
-    elif args.choice == 1:
-        model_names = ["fm"]
+    if args.predict:
+        _, testLoader = DataLoaders[args.dataset_name](args.data_path, args.batch_size)
+        model_path = 'chkpts/gdcn/16/gdcn_s/gdcn_s_best_auc_16_0524152358.pkl'  # args.predict
+        predictions = predict(model_path, testLoader)
+        print(len(predictions))
+        print(sum(predictions)/len(predictions))
+    else:
+        model_names = []
+        if args.choice == 0:
+            #model_names = ["fm", "deepfm", "gdcn_s", "gdcn_p"]
+            model_names = ["gdcn_s"]
+        elif args.choice == 1:
+            model_names = ["fm"]
 
-    print(model_names)
+        print(model_names)
 
-    for i in range(args.repeats):
-        for name in model_names:
-            main(dataset_name=args.dataset_name,
-                 data_path=args.data_path,
-                 model_name=name,
-                 epoch=args.epoch,
-                 learning_rate=args.learning_rate,
-                 batch_size=args.batch_size,
-                 weight_decay=args.weight_decay,
-                 save_dir=args.save_dir,
-                 repeat=i + 1,
-                 emb_dim=args.emb_dim,
-                 hint=args.hint,
-                 )
+        for i in range(args.repeats):
+            for name in model_names:
+                main(dataset_name=args.dataset_name,
+                    data_path=args.data_path,
+                    model_name=name,
+                    epoch=args.epoch,
+                    learning_rate=args.learning_rate,
+                    batch_size=args.batch_size,
+                    weight_decay=args.weight_decay,
+                    save_dir=args.save_dir,
+                    repeat=i + 1,
+                    emb_dim=args.emb_dim,
+                    hint=args.hint,
+                    )

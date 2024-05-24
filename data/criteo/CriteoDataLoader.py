@@ -33,22 +33,43 @@ class CriteoDataset(torch.utils.data.Dataset):
         https://www.csie.ntu.edu.tw/~r01922136/kaggle-2014-criteo.pdf
     """
 
-    def __init__(self, dataset_path=None, cache_path='.criteo', rebuild_cache=False, min_threshold=10):
+    def __init__(self, dataset_path=None, cache_path='.criteo', rebuild_cache=False, min_threshold=10, is_test=False, feat_mapper=None, defaults=None):
         self.NUM_FEATS = 39
         self.NUM_INT_FEATS = 13
         self.min_threshold = min_threshold
-        # The path of Criteo dataset
-        # TODO
-        self.prefix = "criteo/"
-        if rebuild_cache or not Path(cache_path).exists():
-            shutil.rmtree(cache_path, ignore_errors=True)
-            if dataset_path is None:
-                raise ValueError('create cache: failed: dataset_path is None')
-            self.__build_cache(dataset_path, cache_path)
-        self.env = lmdb.open(cache_path, create=False, lock=False, readonly=True)
-        with self.env.begin(write=False) as txn:
-            self.length = txn.stat()['entries'] - 1
-            self.field_dims = np.frombuffer(txn.get(b'field_dims'), dtype=np.uint32)
+
+        if is_test:
+            self.prefix = "criteoTest/"
+            if rebuild_cache or not Path(cache_path).exists():
+                shutil.rmtree(cache_path, ignore_errors=True)
+                if dataset_path is None:
+                    raise ValueError('create cache: failed: dataset_path is None')
+                self.__build_cache(dataset_path, cache_path, feat_mapper, defaults)
+            self.env = lmdb.open(cache_path, create=False, lock=False, readonly=True)
+            with self.env.begin(write=False) as txn:
+                self.length = txn.stat()['entries'] - 1
+                self.field_dims = np.frombuffer(txn.get(b'field_dims'), dtype=np.uint32)
+        else:
+            # The path of Criteo dataset
+            # TODO
+            self.prefix = "criteo/"
+            #dataset_path = 'data/criteo/train_df_sampled_GDCN.csv'
+            dataset_path = 'data/criteo/train_df_GDCN.csv'
+            if rebuild_cache or not Path(cache_path).exists():
+                shutil.rmtree(cache_path, ignore_errors=True)
+                if dataset_path is None:
+                    raise ValueError('create cache: failed: dataset_path is None')
+                
+                self.feat_mapper, self.defaults = self.__get_feat_mapper(dataset_path)
+                self.__save_feat_mapper(self.feat_mapper, self.defaults)
+                
+                self.__build_cache(dataset_path, cache_path)
+            else:
+                self.feat_mapper, self.defaults = self.__load_feat_mapper()
+            self.env = lmdb.open(cache_path, create=False, lock=False, readonly=True)
+            with self.env.begin(write=False) as txn:
+                self.length = txn.stat()['entries'] - 1
+                self.field_dims = np.frombuffer(txn.get(b'field_dims'), dtype=np.uint32)
 
     def __getitem__(self, index):
         # Must be implemented to read data from the cache data
@@ -60,10 +81,15 @@ class CriteoDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.length
 
-    def __build_cache(self, path, cache_path):
-        temp_path = self.prefix + "train.txt"
+    def __build_cache(self, path, cache_path, feat_mapper=None, defaults=None):
+        #temp_path = 'data/' + self.prefix + "train_df_sampled_GDCN.csv"
+        #temp_path = 'data/' + self.prefix + "test_df_GDCN.csv"
+        temp_path = 'data/' + self.prefix + "train_df_GDCN.csv"
+        print("temp_path", temp_path)
 
-        feat_mapper, defaults = self.__get_feat_mapper(temp_path)
+        feat_mapper, defaults = self.__get_feat_mapper(temp_path) if feat_mapper is None else (feat_mapper, defaults)
+
+        # feat_mapper, defaults = self.__get_feat_mapper(temp_path)
 
         with lmdb.open(cache_path, map_size=int(1e11)) as env:
             field_dims = np.zeros(self.NUM_FEATS, dtype=np.uint32)
@@ -80,11 +106,13 @@ class CriteoDataset(torch.utils.data.Dataset):
 
     def __get_feat_mapper(self, path):
         feat_cnts = defaultdict(lambda: defaultdict(int))
+        print(path)
         with open(path) as f:
+            f.readline()
             pbar = tqdm(f, mininterval=1, smoothing=0.1)
             pbar.set_description('Create criteo dataset cache: counting features')
             for line in pbar:
-                values = line.rstrip('\n').split('\t')
+                values = line.rstrip('\n').split(',')
 
                 if len(values) != self.NUM_FEATS + 1:
                     continue
@@ -104,11 +132,15 @@ class CriteoDataset(torch.utils.data.Dataset):
     def __yield_buffer(self, path, feat_mapper, defaults, buffer_size=int(1e5)):
         item_idx = 0
         buffer = list()
+        #path = 'data/criteoTrainSampled/train_df_sampled_GDCN.csv'
+        #path = 'data/criteoTest/test_df_GDCN.csv'
+        path = 'data/criteo/train_df_GDCN.csv'
         with open(path) as f:
+            f.readline()
             pbar = tqdm(f, mininterval=1, smoothing=0.1)
             pbar.set_description('Create criteo dataset cache: setup lmdb')
             for line in pbar:
-                values = line.rstrip('\n').split('\t')
+                values = line.rstrip('\n').split(',')
                 if len(values) != self.NUM_FEATS + 1:
                     continue
                 np_array = np.zeros(self.NUM_FEATS + 1, dtype=np.uint32)
@@ -125,6 +157,19 @@ class CriteoDataset(torch.utils.data.Dataset):
                     buffer.clear()
             yield buffer
 
+    def __save_feat_mapper(self, feat_mapper, defaults):
+        with open('feature_mapping/feat_mapper.npy', 'wb') as f:
+            np.save(f, feat_mapper)
+        with open('feature_mapping/defaults.npy', 'wb') as f:
+            np.save(f, defaults)
+
+    def __load_feat_mapper(self):
+        with open('feature_mapping/feat_mapper.npy', 'rb') as f:
+            feat_mapper = np.load(f, allow_pickle=True).item()
+        with open('feature_mapping/defaults.npy', 'rb') as f:
+            defaults = np.load(f, allow_pickle=True).item()
+        return feat_mapper, defaults
+
 
 @lru_cache(maxsize=None)
 def convert_numeric_feature(val: str):
@@ -133,11 +178,30 @@ def convert_numeric_feature(val: str):
     """
     if val == '':
         return 'NULL'
-    v = int(val)
+    v = float(val)
     if v > 2:
         return str(int(math.log(v) ** 2))
     else:
         return str(v - 2)
+
+
+def get_criteo_dataloader_test(test_path="test_df_GDCN.csv", batch_size=2048):
+    print("Start loading criteo test data....")
+    prefix = "criteoTest/"
+    test_path = "test_df_GDCN.csv"
+    test_path = prefix + test_path
+
+    with open('feature_mapping/feat_mapper.npy', 'rb') as f:
+        feat_mapper = np.load(f, allow_pickle=True).item()
+    with open('feature_mapping/defaults.npy', 'rb') as f:
+        defaults = np.load(f, allow_pickle=True).item()
+
+    dataset = CriteoDataset(dataset_path=test_path, cache_path='data/' + prefix + ".criteoTest", is_test=True, feat_mapper=feat_mapper, defaults=defaults)
+
+    test_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    field_dims = dataset.field_dims
+
+    return field_dims, test_loader
 
 
 def get_criteo_dataloader_811(train_path="train.txt", batch_size=2048):
@@ -145,7 +209,12 @@ def get_criteo_dataloader_811(train_path="train.txt", batch_size=2048):
     print("Start loading criteo data....")
     prefix = "criteo/"
     train_path = prefix + train_path
-    dataset = CriteoDataset(dataset_path=train_path, cache_path=prefix + ".criteo10")
+    #dataset = CriteoDataset(dataset_path=train_path, cache_path='data/' + prefix + ".criteoTrainSampled")
+    dataset = CriteoDataset(dataset_path=train_path, cache_path='data/' + prefix + ".criteoTrain")
+
+    # Save feature mappings after generating from training data
+    feat_mapper, defaults = dataset.feat_mapper, dataset.defaults
+    # dataset.__save_feat_mapper(feat_mapper, defaults)
 
     # Split the training data to 8:1:1
     all_length = len(dataset)
@@ -157,10 +226,11 @@ def get_criteo_dataloader_811(train_path="train.txt", batch_size=2048):
     # print("train_dataset length:", len(train_dataset))
     # print("valid_dataset length:", len(valid_dataset))
     # print("test_dataset length:", len(test_dataset))
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-    valid_Loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    valid_Loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     field_dims = dataset.field_dims
     # print(field_dims)
     # print(sum(field_dims))
+
     return field_dims, train_loader, valid_Loader, test_loader
